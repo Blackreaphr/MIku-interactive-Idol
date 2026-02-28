@@ -1,0 +1,38 @@
+<Window x:Class="Companion.App.OverlayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize"
+        Width="320"
+        Height="320"
+        Left="120"
+        Top="120">
+    <Grid>
+        <Border x:Name="CharacterHitbox"
+                Width="170"
+                Height="240"
+                CornerRadius="18"
+                Background="#22FFFFFF"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Bottom"
+                Margin="18">
+            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                <Ellipse Width="120" Height="120" Fill="#55FFFFFF"/>
+                <TextBlock Text="Companion" Foreground="White" HorizontalAlignment="Center"/>
+            </StackPanel>
+        </Border>
+
+        <Ellipse x:Name="MischiefDot"
+                 Width="10"
+                 Height="10"
+                 Fill="Red"
+                 HorizontalAlignment="Right"
+                 VerticalAlignment="Top"
+                 Margin="10"
+                 Visibility="Collapsed"/>
+    </Grid>
+</Window>
