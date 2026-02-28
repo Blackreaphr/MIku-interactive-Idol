@@ -55,20 +55,36 @@ Supported methods:
 3. `set_mischief_enabled`
 4. `force_off`
 5. `capture_virtual_desktop_png`
-6. `windows.list`
-7. `windows.active`
-8. `windows.under_cursor`
-9. `window.focus`
-10. `window.move_resize`
-11. `window.nudge`
-12. `window.minimize`
-13. `window.maximize`
-14. `window.restore`
-15. `window.close_request`
-16. `get_settings`
-17. `update_settings`
+6. `mischief.cursor_grab_once`
+7. `windows.list`
+8. `windows.active`
+9. `windows.under_cursor`
+10. `window.focus`
+11. `window.move_resize`
+12. `window.nudge`
+13. `window.minimize`
+14. `window.maximize`
+15. `window.restore`
+16. `window.close_request`
+17. `get_settings`
+18. `update_settings`
 
-`update_settings` accepts `allowedProcessesForMischief` (array of process tokens). Entries are normalized to lowercase names without `.exe`. An empty allowlist means mischief actions are allowed for all processes.
+`mischief.cursor_grab_once` accepts optional `durationMs` and `rectSizePx`. Per-call values can only tighten configured limits (they cannot exceed configured settings). The action is gated by `MischiefGate`, `cursorGrabEnabled`, cooldown/active state, and foreground-process allowlist policy.
+
+`update_settings` accepts:
+
+- `allowedProcessesForMischief` (array of process tokens). Entries are normalized to lowercase names without `.exe`. An empty allowlist means mischief window actions are allowed for all processes.
+- `cursorGrabEnabled` (bool, default `false`)
+- `cursorGrabDurationMs` (int, `1..1500`, default `600`)
+- `cursorGrabCooldownMs` (int, `0..60000`, default `5000`)
+- `cursorGrabRectSizePx` (int, `4..200`, default `24`)
+- `cursorGrabRequireAllowList` (bool, default `true`)
+- `allowedProcessesForCursorGrab` (array of process tokens, normalized like other allowlists)
+
+When `cursorGrabRequireAllowList` is true and `allowedProcessesForCursorGrab` is empty, cursor grabs are denied.
+
+`get_status` now includes cursor-grab state/config fields:
+`cursorGrabEnabled`, `cursorGrabDurationMs`, `cursorGrabCooldownMs`, `cursorGrabRectSizePx`, `cursorGrabRequireAllowList`, `allowedProcessesForCursorGrab`, and `cursorGrabActive`.
 
 ## Pipe Client Example (PowerShell)
 
