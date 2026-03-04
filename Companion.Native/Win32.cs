@@ -29,6 +29,15 @@ public static class Win32
         public int Y;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool GetCursorPos(out POINT lpPoint);
 
@@ -53,4 +62,20 @@ public static class Win32
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    [DllImport("user32.dll", EntryPoint = "ClipCursor", SetLastError = true)]
+    private static extern bool ClipCursorRef(ref RECT rect);
+
+    [DllImport("user32.dll", EntryPoint = "ClipCursor", SetLastError = true)]
+    private static extern bool ClipCursorPtr(IntPtr rect);
+
+    public static bool ClipCursor(RECT rect)
+    {
+        return ClipCursorRef(ref rect);
+    }
+
+    public static bool ReleaseCursorClip()
+    {
+        return ClipCursorPtr(IntPtr.Zero);
+    }
 }

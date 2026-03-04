@@ -3,6 +3,7 @@ using System.Security.Principal;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Interop;
+using System.Windows.Threading;
 using Companion.App.Services;
 using Companion.Core;
 using Companion.Native;
@@ -23,6 +24,7 @@ public partial class App : System.Windows.Application
     private IScreenshotService? _screenshotService;
     private IWindowQueryService? _windowQueryService;
     private IWindowActionService? _windowActionService;
+    private CursorGrabService? _cursorGrabService;
     private OverlayWindow? _overlay;
     private TrayController? _trayController;
     private PipeControlServer? _pipeServer;
@@ -54,6 +56,9 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _cursorGrabService?.ForceRelease("app_exit");
+        UnregisterSafetyHandlers();
+
         try
         {
             _pipeServer?.StopAsync().GetAwaiter().GetResult();
@@ -108,6 +113,7 @@ public partial class App : System.Windows.Application
 
         var tokenStore = new SecretTokenStore(Path.Combine(_basePath, "token.txt"));
         _token = tokenStore.LoadOrCreate();
+        RegisterSafetyHandlers();
 
         _gate = new MischiefGate();
         _gate.Changed += OnGateChanged;
@@ -129,6 +135,10 @@ public partial class App : System.Windows.Application
             _gate,
             getAllowedProcesses: () => _settings.AllowedProcessesForMischief,
             getOverlayHwnd: GetOverlayHwnd);
+        _cursorGrabService = new CursorGrabService(
+            _gate,
+            getSettings: () => _settings,
+            logger: _logger);
 
         _hotkeyManager = new HotkeyManager();
         _hotkeyManager.HotkeyPressed += (_, _) => ForceOff("hotkey");
@@ -212,6 +222,11 @@ public partial class App : System.Windows.Application
         Dispatcher.Invoke(() =>
         {
             var enabled = _gate?.Enabled == true;
+            if (!enabled)
+            {
+                _cursorGrabService?.ForceRelease("mischief_gate_changed_off");
+            }
+
             _settings.MischiefEnabled = enabled;
             SaveSettings();
             _trayController?.SetMischiefState(enabled);
@@ -235,6 +250,12 @@ public partial class App : System.Windows.Application
 
         var effectiveAutoOff = _settings.MischiefAutoOffMinutes;
         _settings.MischiefEnabled = enabled;
+
+        if (!enabled)
+        {
+            _cursorGrabService?.ForceRelease("mischief_disabled");
+        }
+
         _gate.SetEnabled(
             enabled,
             enabled ? TimeSpan.FromMinutes(effectiveAutoOff) : null);
@@ -254,11 +275,39 @@ public partial class App : System.Windows.Application
     {
         Dispatcher.Invoke(() =>
         {
+            _cursorGrabService?.ForceRelease("force_off");
             SetMischiefEnabled(false, source);
             _trayController?.ShowNotification("Companion", "Mischief disabled.");
         });
 
         _logger?.Warn("force_off", new Dictionary<string, object?> { ["source"] = source });
+    }
+
+    private void RegisterSafetyHandlers()
+    {
+        DispatcherUnhandledException += OnDispatcherUnhandledException;
+        AppDomain.CurrentDomain.UnhandledException += OnAppDomainUnhandledException;
+    }
+
+    private void UnregisterSafetyHandlers()
+    {
+        DispatcherUnhandledException -= OnDispatcherUnhandledException;
+        AppDomain.CurrentDomain.UnhandledException -= OnAppDomainUnhandledException;
+    }
+
+    private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
+    {
+        _cursorGrabService?.ForceRelease("dispatcher_unhandled_exception");
+        _logger?.Error("dispatcher_unhandled_exception", e.Exception);
+    }
+
+    private void OnAppDomainUnhandledException(object? sender, UnhandledExceptionEventArgs e)
+    {
+        _cursorGrabService?.ForceRelease("appdomain_unhandled_exception");
+        if (e.ExceptionObject is Exception ex)
+        {
+            _logger?.Error("appdomain_unhandled_exception", ex);
+        }
     }
 
     private void ToggleOverlayVisibility()
@@ -495,6 +544,12 @@ public partial class App : System.Windows.Application
                     }
                 }
 
+                case "mischief.cursor_grab_once":
+                {
+                    var response = await Dispatcher.InvokeAsync(() => HandleCursorGrabOnce(request)).Task;
+                    return response;
+                }
+
                 case "windows.list":
                     return HandleWindowsList(request);
 
@@ -593,6 +648,99 @@ public partial class App : System.Windows.Application
             new Dictionary<string, object?>
             {
                 ["windows"] = windows
+            });
+    }
+
+    private PipeControlResponse HandleCursorGrabOnce(PipeControlRequest request)
+    {
+        if (_cursorGrabService is null)
+        {
+            return PipeControlResponse.Failure(request.Id, "internal_error", "Cursor grab service unavailable.");
+        }
+
+        if (request.Params.ValueKind is not (JsonValueKind.Object or JsonValueKind.Undefined or JsonValueKind.Null))
+        {
+            return PipeControlResponse.Failure(request.Id, "invalid_request", "params must be an object.");
+        }
+
+        int? requestedDurationMs = null;
+        if (TryGetProperty(request.Params, "durationMs", out var durationElement))
+        {
+            if (!durationElement.TryGetInt32(out var parsedDuration))
+            {
+                return PipeControlResponse.Failure(
+                    request.Id,
+                    "invalid_request",
+                    "params.durationMs must be an integer.");
+            }
+
+            requestedDurationMs = parsedDuration;
+        }
+
+        int? requestedRectSizePx = null;
+        if (TryGetProperty(request.Params, "rectSizePx", out var rectSizeElement))
+        {
+            if (!rectSizeElement.TryGetInt32(out var parsedRectSize))
+            {
+                return PipeControlResponse.Failure(
+                    request.Id,
+                    "invalid_request",
+                    "params.rectSizePx must be an integer.");
+            }
+
+            requestedRectSizePx = parsedRectSize;
+        }
+
+        _logger?.Info(
+            "cursor_grab_attempt",
+            new Dictionary<string, object?>
+            {
+                ["durationMs"] = requestedDurationMs,
+                ["rectSizePx"] = requestedRectSizePx
+            });
+
+        var result = _cursorGrabService.TryGrabOnce(requestedDurationMs, requestedRectSizePx);
+        if (!result.Success)
+        {
+            var details = new Dictionary<string, object?>();
+            if (result.RetryAfterMs.HasValue)
+            {
+                details["retryAfterMs"] = result.RetryAfterMs.Value;
+            }
+
+            if (!string.IsNullOrWhiteSpace(result.ForegroundProcess))
+            {
+                details["foregroundProcess"] = result.ForegroundProcess;
+            }
+
+            _logger?.Warn(
+                "cursor_grab_denied",
+                new Dictionary<string, object?>
+                {
+                    ["code"] = result.Code,
+                    ["message"] = result.Message,
+                    ["durationMs"] = requestedDurationMs,
+                    ["rectSizePx"] = requestedRectSizePx
+                });
+
+            return PipeControlResponse.Failure(
+                request.Id,
+                result.Code,
+                result.Message,
+                details.Count > 0 ? details : null);
+        }
+
+        return PipeControlResponse.Success(
+            request.Id,
+            new Dictionary<string, object?>
+            {
+                ["action"] = "cursor_grab_once",
+                ["durationMs"] = result.EffectiveDurationMs,
+                ["rectSizePx"] = result.EffectiveRectSizePx,
+                ["anchorX"] = result.AnchorX,
+                ["anchorY"] = result.AnchorY,
+                ["foregroundProcess"] = result.ForegroundProcess,
+                ["active"] = _cursorGrabService.IsActive
             });
     }
 
@@ -816,6 +964,13 @@ public partial class App : System.Windows.Application
             ["captureEnabled"] = _settings.CaptureEnabled,
             ["captureMinIntervalMs"] = _settings.CaptureMinIntervalMs,
             ["allowedProcessesForMischief"] = _settings.AllowedProcessesForMischief,
+            ["cursorGrabEnabled"] = _settings.CursorGrabEnabled,
+            ["cursorGrabDurationMs"] = _settings.CursorGrabDurationMs,
+            ["cursorGrabCooldownMs"] = _settings.CursorGrabCooldownMs,
+            ["cursorGrabRectSizePx"] = _settings.CursorGrabRectSizePx,
+            ["cursorGrabRequireAllowList"] = _settings.CursorGrabRequireAllowList,
+            ["allowedProcessesForCursorGrab"] = _settings.AllowedProcessesForCursorGrab,
+            ["cursorGrabActive"] = _cursorGrabService?.IsActive == true,
             ["overlayVisible"] = _overlay?.IsVisible == true,
             ["pipeName"] = _pipeName
         };
@@ -904,6 +1059,84 @@ public partial class App : System.Windows.Application
             }
 
             settings.AllowedProcessesForMischief = entries;
+        }
+
+        if (TryGetProperty(parameters, "cursorGrabEnabled", out var cursorGrabEnabledElement))
+        {
+            if (cursorGrabEnabledElement.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            {
+                error = "cursorGrabEnabled must be a boolean.";
+                return false;
+            }
+
+            settings.CursorGrabEnabled = cursorGrabEnabledElement.GetBoolean();
+        }
+
+        if (TryGetProperty(parameters, "cursorGrabDurationMs", out var cursorGrabDurationElement))
+        {
+            if (!cursorGrabDurationElement.TryGetInt32(out var cursorGrabDurationMs))
+            {
+                error = "cursorGrabDurationMs must be an integer.";
+                return false;
+            }
+
+            settings.CursorGrabDurationMs = cursorGrabDurationMs;
+        }
+
+        if (TryGetProperty(parameters, "cursorGrabCooldownMs", out var cursorGrabCooldownElement))
+        {
+            if (!cursorGrabCooldownElement.TryGetInt32(out var cursorGrabCooldownMs))
+            {
+                error = "cursorGrabCooldownMs must be an integer.";
+                return false;
+            }
+
+            settings.CursorGrabCooldownMs = cursorGrabCooldownMs;
+        }
+
+        if (TryGetProperty(parameters, "cursorGrabRectSizePx", out var cursorGrabRectElement))
+        {
+            if (!cursorGrabRectElement.TryGetInt32(out var cursorGrabRectSizePx))
+            {
+                error = "cursorGrabRectSizePx must be an integer.";
+                return false;
+            }
+
+            settings.CursorGrabRectSizePx = cursorGrabRectSizePx;
+        }
+
+        if (TryGetProperty(parameters, "cursorGrabRequireAllowList", out var cursorGrabRequireAllowListElement))
+        {
+            if (cursorGrabRequireAllowListElement.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            {
+                error = "cursorGrabRequireAllowList must be a boolean.";
+                return false;
+            }
+
+            settings.CursorGrabRequireAllowList = cursorGrabRequireAllowListElement.GetBoolean();
+        }
+
+        if (TryGetProperty(parameters, "allowedProcessesForCursorGrab", out var cursorAllowlistElement))
+        {
+            if (cursorAllowlistElement.ValueKind != JsonValueKind.Array)
+            {
+                error = "allowedProcessesForCursorGrab must be an array of strings.";
+                return false;
+            }
+
+            var entries = new List<string>();
+            foreach (var item in cursorAllowlistElement.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.String)
+                {
+                    error = "allowedProcessesForCursorGrab must contain only string values.";
+                    return false;
+                }
+
+                entries.Add(item.GetString() ?? string.Empty);
+            }
+
+            settings.AllowedProcessesForCursorGrab = entries;
         }
 
         if (TryGetProperty(parameters, "hotkey", out var hotkeyElement))

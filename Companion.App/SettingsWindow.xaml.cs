@@ -6,13 +6,16 @@ namespace Companion.App;
 
 public partial class SettingsWindow : Window
 {
+    private readonly CompanionSettings _baseline;
+
     public CompanionSettings? UpdatedSettings { get; private set; }
 
     public SettingsWindow(CompanionSettings current)
     {
         InitializeComponent();
+        _baseline = current.Clone();
         PopulateKeyOptions();
-        LoadFrom(current);
+        LoadFrom(_baseline);
     }
 
     private void PopulateKeyOptions()
@@ -61,19 +64,17 @@ public partial class SettingsWindow : Window
             return;
         }
 
-        var next = new CompanionSettings
+        var next = _baseline.Clone();
+        next.MischiefEnabled = MischiefEnabledCheck.IsChecked == true;
+        next.MischiefAutoOffMinutes = autoOffMinutes;
+        next.CaptureEnabled = CaptureEnabledCheck.IsChecked == true;
+        next.CaptureMinIntervalMs = captureMinInterval;
+        next.Hotkey = new HotkeySettings
         {
-            MischiefEnabled = MischiefEnabledCheck.IsChecked == true,
-            MischiefAutoOffMinutes = autoOffMinutes,
-            CaptureEnabled = CaptureEnabledCheck.IsChecked == true,
-            CaptureMinIntervalMs = captureMinInterval,
-            Hotkey = new HotkeySettings
-            {
-                Control = CtrlCheck.IsChecked == true,
-                Alt = AltCheck.IsChecked == true,
-                Shift = ShiftCheck.IsChecked == true,
-                VirtualKey = selectedKey.VirtualKey
-            }
+            Control = CtrlCheck.IsChecked == true,
+            Alt = AltCheck.IsChecked == true,
+            Shift = ShiftCheck.IsChecked == true,
+            VirtualKey = selectedKey.VirtualKey
         };
 
         if (!next.TryValidate(out var error))
