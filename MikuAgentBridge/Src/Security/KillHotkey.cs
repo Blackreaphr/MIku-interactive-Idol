@@ -68,7 +68,7 @@ public sealed class KillHotkey : IDisposable
                         break;
                     }
 
-                    if (msg.message == WmHotkey && msg.wParam.ToInt32() == HotkeyId)
+                    if (msg.message == WmHotkey && msg.wParam == (UIntPtr)HotkeyId)
                     {
                         try
                         {
