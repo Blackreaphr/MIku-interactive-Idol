@@ -14,6 +14,9 @@ obj/
 TestResults/
 coverage/
 
+# Local Unity path for MikuAgentBridge
+MikuAgentBridge/Unity.Local.props
+
 # OS files
 .DS_Store
 Thumbs.db

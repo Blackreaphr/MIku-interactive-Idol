@@ -30,6 +30,26 @@ dotnet test Companion.Tests\Companion.Tests.csproj -c Debug
 dotnet run --project Companion.App\Companion.App.csproj
 ```
 
+## MikuAgentBridge Build Setup
+
+`MikuAgentBridge` needs Unity assemblies (`UnityEngine.CoreModule.dll` and `UnityEngine.AnimationModule.dll`).
+
+Configure one of these:
+
+1. Set env var `UNITY_MANAGED_DIR` to the Unity managed folder (usually `...\Editor\Data\Managed\UnityEngine`).
+2. Copy `MikuAgentBridge\Unity.Local.props.example` to `MikuAgentBridge\Unity.Local.props` and set `UnityManagedDir`.
+3. Or auto-generate `Unity.Local.props` (tries latest Unity Hub editor):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File MikuAgentBridge\scripts\configure-unity-path.ps1
+```
+
+Then build:
+
+```powershell
+dotnet build MikuAgentBridge\MikuAgentBridge.csproj
+```
+
 ## Runtime Files
 
 Companion stores runtime data under:

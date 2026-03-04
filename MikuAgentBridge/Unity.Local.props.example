@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <!-- Directory containing UnityEngine.CoreModule.dll and UnityEngine.AnimationModule.dll -->
+    <UnityManagedDir>C:\Program Files\Unity\Hub\Editor\6000.0.XXf1\Editor\Data\Managed\UnityEngine</UnityManagedDir>
+  </PropertyGroup>
+</Project>

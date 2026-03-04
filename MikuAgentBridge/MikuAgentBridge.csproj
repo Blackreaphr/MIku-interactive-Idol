@@ -1,4 +1,6 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="Unity.Local.props" Condition="Exists('Unity.Local.props')" />
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
@@ -7,10 +9,30 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>MikuAgentBridge</AssemblyName>
     <RootNamespace>MikuAgentBridge</RootNamespace>
+    <UnityManagedDir Condition="'$(UnityManagedDir)' == '' and '$(UNITY_MANAGED_DIR)' != ''">$(UNITY_MANAGED_DIR)</UnityManagedDir>
+    <UnityManagedDir Condition="'$(UnityManagedDir)' == '' and Exists('$(MSBuildThisFileDirectory)Libs\UnityEngine\UnityEngine.CoreModule.dll')">$(MSBuildThisFileDirectory)Libs\UnityEngine</UnityManagedDir>
+    <UnityManagedDir Condition="'$(UnityManagedDir)' == '' and Exists('$(MSBuildThisFileDirectory)Libs\UnityEngine.CoreModule.dll')">$(MSBuildThisFileDirectory)Libs</UnityManagedDir>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="UnityEngine.CoreModule" Condition="Exists('$(UnityManagedDir)\UnityEngine.CoreModule.dll')">
+      <HintPath>$(UnityManagedDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AnimationModule" Condition="Exists('$(UnityManagedDir)\UnityEngine.AnimationModule.dll')">
+      <HintPath>$(UnityManagedDir)\UnityEngine.AnimationModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="LavaGang.MelonLoader" Version="0.6.6" />
     <PackageReference Include="System.Drawing.Common" Version="6.0.0" />
   </ItemGroup>
+
+  <Target Name="ValidateUnityManagedDir" BeforeTargets="ResolveReferences">
+    <Error Condition="'$(UnityManagedDir)' == ''" Text="MikuAgentBridge requires Unity managed assemblies. Set UNITY_MANAGED_DIR or add MikuAgentBridge/Unity.Local.props with a UnityManagedDir path." />
+    <Error Condition="!Exists('$(UnityManagedDir)\UnityEngine.CoreModule.dll')" Text="UnityEngine.CoreModule.dll was not found under '$(UnityManagedDir)'." />
+    <Error Condition="!Exists('$(UnityManagedDir)\UnityEngine.AnimationModule.dll')" Text="UnityEngine.AnimationModule.dll was not found under '$(UnityManagedDir)'." />
+  </Target>
 </Project>
