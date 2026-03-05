@@ -86,6 +86,7 @@ def default_vrm_meta() -> dict:
 
 
 UNITY_TARGET_HEIGHT = 1.60
+EXPORT_HEIGHT_TOLERANCE_RATIO = 0.15
 TRANSFORM_EPSILON = 1e-5
 GLTF_TRANSFORM_EPSILON = 1e-4
 TEMP_DIR_CLEANUP_WARNINGS: list[dict[str, str | int | None]] = []
@@ -619,6 +620,7 @@ def build_manifest(
     glb_path: Path | None = None,
     vrm_support: dict | None = None,
     export_details: dict | None = None,
+    validation: dict | None = None,
     error: str | None = None,
 ) -> dict:
     warnings = []
@@ -652,6 +654,7 @@ def build_manifest(
         },
         "vrmSupport": vrm_support,
         "exportDetails": export_details or {},
+        "validation": validation or {},
         "warnings": warnings,
         "error": error,
     }
@@ -671,17 +674,83 @@ def select_export_objects(armature: bpy.types.Object) -> list[bpy.types.Object]:
     return export_objects
 
 
-def apply_export_object_transforms(
+def apply_object_transforms(
+    objects: list[bpy.types.Object],
+    *,
+    location: bool = False,
+    rotation: bool = False,
+    scale: bool = False,
+) -> int:
+    if not objects:
+        return 0
+
+    applied = 0
+    for obj in objects:
+        ensure_object_mode(obj)
+        deselect_all()
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        bpy.ops.object.transform_apply(location=location, rotation=rotation, scale=scale)
+        applied += 1
+
+    return applied
+
+
+def apply_armature_root_transforms(
     armature: bpy.types.Object,
     *,
     location: bool = False,
     rotation: bool = False,
     scale: bool = False,
 ) -> int:
-    ensure_object_mode(armature)
-    export_objects = select_export_objects(armature)
-    bpy.ops.object.transform_apply(location=location, rotation=rotation, scale=scale)
-    return len(export_objects)
+    return apply_object_transforms(
+        [armature],
+        location=location,
+        rotation=rotation,
+        scale=scale,
+    )
+
+
+def apply_mesh_object_transforms(
+    armature: bpy.types.Object,
+    *,
+    location: bool = False,
+    rotation: bool = False,
+    scale: bool = False,
+) -> int:
+    return apply_object_transforms(
+        armature_descendant_meshes(armature),
+        location=location,
+        rotation=rotation,
+        scale=scale,
+    )
+
+
+def validate_mesh_skinning(summary: dict) -> dict:
+    issues = []
+    for mesh in summary["meshes"]:
+        armature_modifiers = [name for name in mesh["armatureModifiers"] if name]
+        if not armature_modifiers:
+            issues.append(
+                {
+                    "mesh": mesh["name"],
+                    "reason": "missingArmatureModifier",
+                }
+            )
+
+        if mesh["vertexGroupCount"] <= 0:
+            issues.append(
+                {
+                    "mesh": mesh["name"],
+                    "reason": "missingVertexGroups",
+                }
+            )
+
+    return {
+        "passed": not issues,
+        "issueCount": len(issues),
+        "issues": issues,
+    }
 
 
 def ensure_preview_camera(min_v: Vector, max_v: Vector) -> bpy.types.Object:
@@ -751,12 +820,19 @@ def prepare_unity_export_profile(armature: bpy.types.Object) -> dict:
     ensure_object_mode(armature)
     pre_transform = object_transform_snapshot(armature)
 
-    initial_object_count = apply_export_object_transforms(
+    initial_armature_bake_count = apply_armature_root_transforms(
         armature,
         location=True,
         rotation=True,
         scale=True,
     )
+    initial_mesh_bake_count = apply_mesh_object_transforms(
+        armature,
+        location=True,
+        rotation=True,
+        scale=True,
+    )
+    initial_object_count = initial_armature_bake_count + initial_mesh_bake_count
 
     meshes = armature_descendant_meshes(armature)
     min_v, max_v, pre_bounds = bounds_for_objects(meshes)
@@ -765,21 +841,25 @@ def prepare_unity_export_profile(armature: bpy.types.Object) -> dict:
         raise RuntimeError("Unable to normalize export profile because the mesh height is zero.")
 
     scale_factor = UNITY_TARGET_HEIGHT / float(source_height)
+    scale_bake_count = 0
     if abs(scale_factor - 1.0) > TRANSFORM_EPSILON:
-        armature.scale = Vector((scale_factor, scale_factor, scale_factor))
-        apply_export_object_transforms(armature, scale=True)
+        armature.scale = armature.scale * scale_factor
+        scale_bake_count = apply_armature_root_transforms(armature, scale=True)
 
     meshes = armature_descendant_meshes(armature)
     scaled_min_v, scaled_max_v, scaled_bounds = bounds_for_objects(meshes)
     scaled_center = (scaled_min_v + scaled_max_v) / 2.0
     ground_offset = Vector((-scaled_center.x, -scaled_center.y, -scaled_min_v.z))
+    location_bake_count = 0
     if not vector_is_close(ground_offset, (0.0, 0.0, 0.0), TRANSFORM_EPSILON):
         armature.location = armature.location + ground_offset
-        apply_export_object_transforms(armature, location=True)
+        location_bake_count = apply_armature_root_transforms(armature, location=True)
 
     meshes = armature_descendant_meshes(armature)
     final_min_v, final_max_v, final_bounds = bounds_for_objects(meshes)
     final_center = (final_min_v + final_max_v) / 2.0
+    final_height = float(final_bounds["size"][2])
+    height_tolerance = UNITY_TARGET_HEIGHT * EXPORT_HEIGHT_TOLERANCE_RATIO
 
     return {
         "targetHeight": round(UNITY_TARGET_HEIGHT, 6),
@@ -795,19 +875,68 @@ def prepare_unity_export_profile(armature: bpy.types.Object) -> dict:
                 "rotation": True,
                 "scale": True,
                 "objectCount": initial_object_count,
+                "armatureObjectCount": initial_armature_bake_count,
+                "meshObjectCount": initial_mesh_bake_count,
             },
+            "scaleBakeObjectCount": scale_bake_count,
+            "locationBakeObjectCount": location_bake_count,
             "preTransform": pre_transform,
             "postTransform": object_transform_snapshot(armature),
             "appliedGroundOffset": rounded_list(ground_offset),
             "boundsBeforeNormalization": pre_bounds,
             "boundsAfterScale": scaled_bounds,
             "finalBounds": final_bounds,
+            "finalHeight": round(final_height, 6),
+            "heightTolerance": round(float(height_tolerance), 6),
+            "heightWithinTolerance": abs(final_height - UNITY_TARGET_HEIGHT) <= height_tolerance,
             "rootObjectIsIdentity": object_transform_is_identity(armature),
             "groundedToZero": abs(final_min_v.z) <= GLTF_TRANSFORM_EPSILON,
             "centeredOnOrigin": abs(final_center.x) <= GLTF_TRANSFORM_EPSILON
             and abs(final_center.y) <= GLTF_TRANSFORM_EPSILON,
         },
     }
+
+
+def build_export_validation(summary: dict, export_details: dict) -> dict:
+    skinning = validate_mesh_skinning(summary)
+    unity_profile = export_details["unityProfile"]
+    root_normalization = unity_profile["rootNormalization"]
+    exported_scene_root = unity_profile.get("exportedSceneRoot", {})
+    target_height = float(unity_profile["targetHeight"])
+    final_height = float(root_normalization["finalHeight"])
+    height_tolerance = float(root_normalization["heightTolerance"])
+
+    validation = {
+        "scaleTarget": round(target_height, 6),
+        "finalHeight": round(final_height, 6),
+        "heightTolerance": round(height_tolerance, 6),
+        "heightWithinTolerance": abs(final_height - target_height) <= height_tolerance,
+        "meshSkinningPassed": skinning["passed"],
+        "meshSkinningIssues": skinning["issues"],
+        "rootObjectIsIdentity": bool(root_normalization["rootObjectIsIdentity"]),
+        "exportedSceneRootIsIdentity": bool(exported_scene_root.get("isIdentity", False)),
+    }
+    return validation
+
+
+def enforce_export_validation(validation: dict, export_details: dict) -> None:
+    errors = []
+    if not validation["exportedSceneRootIsIdentity"]:
+        errors.append("exported scene root is not identity after normalization")
+    if not validation["heightWithinTolerance"]:
+        errors.append(
+            "final height "
+            + f"{validation['finalHeight']} is outside target {validation['scaleTarget']} "
+            + f"+/- {validation['heightTolerance']}"
+        )
+    if not validation["meshSkinningPassed"]:
+        skinning_errors = ", ".join(
+            f"{issue['mesh']}:{issue['reason']}" for issue in validation["meshSkinningIssues"]
+        )
+        errors.append(f"mesh skinning validation failed: {skinning_errors}")
+
+    if errors:
+        raise RuntimeError("Export validation failed: " + "; ".join(errors))
 
 
 def configure_vrm_humanoid(armature: bpy.types.Object) -> dict:
@@ -1118,6 +1247,7 @@ def run_inspect(output_dir: Path, armature: bpy.types.Object, manifest_name: str
         source_blend="",
         status="completed",
         manifest_path=manifest_path,
+        validation={"meshSkinningPassed": validate_mesh_skinning(summary)["passed"]},
     )
     write_json(manifest_path, manifest)
     print(f"Wrote scene summary to {inspect_path}")
@@ -1156,6 +1286,7 @@ def run_export_fbx(
         preview_path=preview_path,
         fbx_path=fbx_path,
         glb_path=copied_glb,
+        validation={"meshSkinningPassed": validate_mesh_skinning(summary)["passed"]},
     )
     write_json(manifest_path, manifest)
     write_legacy_export_json(output_dir, inspect_path, preview_path, fbx_path, None, copied_glb)
@@ -1183,9 +1314,17 @@ def run_export_vrm(
     try:
         unity_profile = prepare_unity_export_profile(armature)
         summary = scene_summary(armature, relinked_images)
+        mesh_skinning = validate_mesh_skinning(summary)
+        if not mesh_skinning["passed"]:
+            skinning_errors = ", ".join(
+                f"{issue['mesh']}:{issue['reason']}" for issue in mesh_skinning["issues"]
+            )
+            raise RuntimeError("Mesh skinning validation failed before export: " + skinning_errors)
         write_json(inspect_path, summary)
         render_preview(preview_path, armature_descendant_meshes(armature))
         vrm_support, export_details = export_vrm(vrm_path, armature, unity_profile)
+        validation = build_export_validation(summary, export_details)
+        enforce_export_validation(validation, export_details)
         manifest = build_manifest(
             command="export-vrm",
             summary=summary,
@@ -1198,6 +1337,7 @@ def run_export_vrm(
             glb_path=copied_glb,
             vrm_support=vrm_support,
             export_details=export_details,
+            validation=validation,
         )
         write_json(manifest_path, manifest)
         write_legacy_export_json(output_dir, inspect_path, preview_path, None, vrm_path, copied_glb)
@@ -1205,6 +1345,7 @@ def run_export_vrm(
         return 0
     except Exception as exc:
         summary = scene_summary(armature, relinked_images)
+        failed_validation = {"meshSkinningPassed": validate_mesh_skinning(summary)["passed"]}
         write_json(inspect_path, summary)
         render_preview(preview_path, armature_descendant_meshes(armature))
         manifest = build_manifest(
@@ -1217,6 +1358,7 @@ def run_export_vrm(
             preview_path=preview_path,
             glb_path=copied_glb,
             vrm_support=detect_vrm_support(),
+            validation=failed_validation,
             error=str(exc),
         )
         write_json(manifest_path, manifest)

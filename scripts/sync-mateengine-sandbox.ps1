@@ -32,6 +32,11 @@ if ($LASTEXITCODE -gt 7) {
     throw "Robocopy failed with exit code $LASTEXITCODE while syncing the MateEngine sandbox."
 }
 
+& (Join-Path $PSScriptRoot "patch-mateengine-runtime.ps1") `
+    -AssemblyPaths @(
+        (Join-Path $resolvedSandbox "MateEngineX_Data\Managed\Assembly-CSharp.dll")
+    )
+
 $manifest = [ordered]@{
     generatedAt = (Get-Date).ToUniversalTime().ToString("o")
     source = $resolvedSource
