@@ -17,6 +17,21 @@ coverage/
 # Local Unity path for MikuAgentBridge
 MikuAgentBridge/Unity.Local.props
 
+# Local tooling state
+.blender-temp/
+.blender-user-config/
+.blender-user-scripts/
+.dotnetcli/
+.tmp-miku-src/
+__pycache__/
+*.pyc
+restore.log
+
+# Generated assets and runtime sandboxes
+artifacts/
+sandbox/
+vendor/VRM-Addon-for-Blender/
+
 # OS files
 .DS_Store
 Thumbs.db
