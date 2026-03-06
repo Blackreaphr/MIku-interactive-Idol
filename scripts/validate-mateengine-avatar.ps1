@@ -99,25 +99,34 @@ function Resolve-ValidationTarget {
     param([string]$Value)
 
     $candidatePath = $null
-    if ([System.IO.Path]::IsPathRooted($Value) -and (Test-Path $Value)) {
+    if ([System.IO.Path]::IsPathRooted($Value) -and (Test-Path -LiteralPath $Value)) {
         $candidatePath = [System.IO.Path]::GetFullPath($Value)
     } else {
         $repoCandidate = Join-Path $repoRoot $Value
-        if (Test-Path $repoCandidate) {
+        if (Test-Path -LiteralPath $repoCandidate) {
             $candidatePath = [System.IO.Path]::GetFullPath($repoCandidate)
-        } elseif (Test-Path $Value) {
+        } elseif (Test-Path -LiteralPath $Value) {
             $candidatePath = [System.IO.Path]::GetFullPath($Value)
         }
     }
 
     if ($null -ne $candidatePath) {
-        if (!(Test-Path $candidatePath)) {
-            throw "Validation target file not found at '$candidatePath'."
+        $candidateItem = Get-Item -LiteralPath $candidatePath -ErrorAction Stop
+        if ($candidateItem.PSIsContainer) {
+            $vrmFiles = @(Get-ChildItem -LiteralPath $candidatePath -Recurse -File -Filter *.vrm)
+            if ($vrmFiles.Count -eq 1) {
+                $candidatePath = [System.IO.Path]::GetFullPath($vrmFiles[0].FullName)
+            } elseif ($vrmFiles.Count -eq 0) {
+                throw "Validation target directory '$candidatePath' does not contain a .vrm file."
+            } else {
+                $matches = $vrmFiles | Select-Object -ExpandProperty FullName
+                throw "Validation target directory '$candidatePath' contains multiple .vrm files: $($matches -join ', '). Pass an explicit file path."
+            }
         }
 
         New-Item -ItemType Directory -Force -Path $stagedImportDir | Out-Null
         $stagedImportPath = Join-Path $stagedImportDir ([System.IO.Path]::GetFileName($candidatePath))
-        Copy-Item -Path $candidatePath -Destination $stagedImportPath -Force
+        Copy-Item -LiteralPath $candidatePath -Destination $stagedImportPath -Force
 
         return [ordered]@{
             mode = "file"

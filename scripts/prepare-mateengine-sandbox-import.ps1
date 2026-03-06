@@ -1,6 +1,6 @@
 param(
     [string]$SandboxDir = "sandbox\MateEngineX",
-    [string]$VrmPath = "artifacts\yyb-miku\yyb-miku-export.vrm",
+    [string]$VrmPath = "",
     [string]$RuntimeDataDir = "$env:USERPROFILE\AppData\LocalLow\Shinymoon\MateEngineX"
 )
 
@@ -9,18 +9,108 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $resolvedSandbox = Join-Path $repoRoot $SandboxDir
 $sandboxExe = Join-Path $resolvedSandbox "MateEngineX.exe"
-$resolvedVrmPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $VrmPath))
 $resolvedRuntimeDataDir = [System.IO.Path]::GetFullPath($RuntimeDataDir)
+$settingsPath = Join-Path $resolvedRuntimeDataDir "settings.json"
 $backupRoot = Join-Path $repoRoot "sandbox\AppDataBackups"
 $sessionRoot = Join-Path $repoRoot "sandbox\ImportSession"
 $stagedImportDir = Join-Path $resolvedSandbox "Imports"
 
-if (!(Test-Path $sandboxExe)) {
-    throw "Sandbox executable not found at '$sandboxExe'. Run scripts\sync-mateengine-sandbox.ps1 first."
+function Resolve-ExistingPath {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $null
+    }
+
+    $candidates = @()
+    if ([System.IO.Path]::IsPathRooted($Value)) {
+        $candidates += $Value
+    } else {
+        $candidates += (Join-Path $repoRoot $Value)
+        $candidates += $Value
+    }
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return [System.IO.Path]::GetFullPath($candidate)
+        }
+    }
+
+    return $null
 }
 
-if (!(Test-Path $resolvedVrmPath)) {
-    throw "VRM artifact not found at '$resolvedVrmPath'. Run scripts\run-yyb-pipeline.ps1 export-vrm first."
+function Resolve-VrmPath {
+    param([string]$Value)
+
+    $candidatePath = Resolve-ExistingPath -Value $Value
+    if ($null -eq $candidatePath) {
+        throw "VRM source '$Value' was not found. Provide a .vrm file path or a directory containing a single .vrm."
+    }
+
+    $candidateItem = Get-Item -LiteralPath $candidatePath -ErrorAction Stop
+    if ($candidateItem.PSIsContainer) {
+        $vrmFiles = @(Get-ChildItem -LiteralPath $candidatePath -Recurse -File -Filter *.vrm)
+        if ($vrmFiles.Count -eq 1) {
+            return [System.IO.Path]::GetFullPath($vrmFiles[0].FullName)
+        }
+
+        if ($vrmFiles.Count -eq 0) {
+            throw "No .vrm files were found under '$candidatePath'."
+        }
+
+        $matches = $vrmFiles | Select-Object -ExpandProperty FullName
+        throw "Multiple .vrm files were found under '$candidatePath': $($matches -join ', '). Pass an explicit file path."
+    }
+
+    if (-not [string]::Equals($candidateItem.Extension, ".vrm", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Resolved input '$candidatePath' is not a .vrm file."
+    }
+
+    return [System.IO.Path]::GetFullPath($candidateItem.FullName)
+}
+
+function Set-SelectedModelPath {
+    param(
+        [string]$SettingsPath,
+        [string]$ModelPath
+    )
+
+    if (!(Test-Path -LiteralPath $SettingsPath)) {
+        return $false
+    }
+
+    $settings = Get-Content -Raw -LiteralPath $SettingsPath | ConvertFrom-Json
+    $settings.selectedModelPath = $ModelPath
+    $settings | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $SettingsPath -Encoding UTF8
+    return $true
+}
+
+function Resolve-RequestedVrmPath {
+    param(
+        [string]$RequestedValue,
+        [string]$SettingsPath
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($RequestedValue)) {
+        return $RequestedValue
+    }
+
+    if (Test-Path -LiteralPath $SettingsPath) {
+        $settings = Get-Content -Raw -LiteralPath $SettingsPath | ConvertFrom-Json
+        $configuredPath = $settings.selectedModelPath
+        if (-not [string]::IsNullOrWhiteSpace($configuredPath) -and (Test-Path -LiteralPath $configuredPath)) {
+            return $configuredPath
+        }
+    }
+
+    return "artifacts\yyb-miku\yyb-miku-export.vrm"
+}
+
+$requestedVrmPath = Resolve-RequestedVrmPath -RequestedValue $VrmPath -SettingsPath $settingsPath
+$resolvedVrmPath = Resolve-VrmPath -Value $requestedVrmPath
+
+if (!(Test-Path $sandboxExe)) {
+    throw "Sandbox executable not found at '$sandboxExe'. Run scripts\sync-mateengine-sandbox.ps1 first."
 }
 
 $sandboxExePath = [System.IO.Path]::GetFullPath($sandboxExe)
@@ -87,18 +177,28 @@ $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $backupPath = Join-Path $backupRoot "MateEngineX-$timestamp"
 $sessionPath = Join-Path $sessionRoot "session-$timestamp.json"
 $stagedImportPath = Join-Path $stagedImportDir ([System.IO.Path]::GetFileName($resolvedVrmPath))
+$sourceEqualsDestination = [string]::Equals(
+    [System.IO.Path]::GetFullPath($resolvedVrmPath),
+    [System.IO.Path]::GetFullPath($stagedImportPath),
+    [System.StringComparison]::OrdinalIgnoreCase
+)
 
 if (Test-Path $resolvedRuntimeDataDir) {
-    Copy-Item -Path $resolvedRuntimeDataDir -Destination $backupPath -Recurse -Force
+    Copy-Item -LiteralPath $resolvedRuntimeDataDir -Destination $backupPath -Recurse -Force
 }
 
-Copy-Item -Path $resolvedVrmPath -Destination $stagedImportPath -Force
+if (-not $sourceEqualsDestination) {
+    Copy-Item -LiteralPath $resolvedVrmPath -Destination $stagedImportPath -Force
+}
+Set-SelectedModelPath -SettingsPath $settingsPath -ModelPath $stagedImportPath | Out-Null
 Set-Clipboard -Value $stagedImportPath
 
 $session = [ordered]@{
     createdAt = (Get-Date).ToString("o")
     runtimeDataDir = $resolvedRuntimeDataDir
     backupPath = if (Test-Path $backupPath) { $backupPath } else { $null }
+    settingsPath = $settingsPath
+    selectedModelPath = $stagedImportPath
     sourceVrmPath = $resolvedVrmPath
     stagedVrmPath = $stagedImportPath
     sandboxExe = $sandboxExePath

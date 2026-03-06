@@ -8,7 +8,10 @@ param(
 
     [string]$WorkingRoot = ".tmp-miku-src\yyb-miku",
 
-    [string]$BlenderUserScriptsDir = ".blender-user-scripts"
+    [string]$BlenderUserScriptsDir = ".blender-user-scripts",
+
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$PipelineArgs = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -78,5 +81,7 @@ $blenderArgs += @(
     "--source-blend",
     $resolvedBlend
 )
+
+$blenderArgs += $PipelineArgs
 
 & $blenderExe @blenderArgs

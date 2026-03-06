@@ -67,6 +67,12 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Original source blend path when running against a working copy.",
     )
+    parser.add_argument(
+        "--exclude-object",
+        action="append",
+        default=[],
+        help="Optional mesh object name to exclude from export and validation. Repeat for multiple objects.",
+    )
     return parser.parse_args(argv)
 
 
@@ -90,24 +96,46 @@ EXPORT_HEIGHT_TOLERANCE_RATIO = 0.15
 TRANSFORM_EPSILON = 1e-5
 GLTF_TRANSFORM_EPSILON = 1e-4
 TEMP_DIR_CLEANUP_WARNINGS: list[dict[str, str | int | None]] = []
+FACE_ALPHA_MODE_OVERRIDES = {
+    "Material.004": "MASK",
+    "Material.005": "MASK",
+    "Material.010": "MASK",
+}
+FACE_ALPHA_CUTOFF = 0.5
+SHADOW_OVERRIDE_MATERIALS = {
+    "Material.020": {
+        "color": (0.72, 0.64, 0.66, 1.0),
+        "alpha_scale": 1.0,
+        "alpha_mode": "BLEND",
+    }
+}
+DEFAULT_EXPORT_EXCLUDED_OBJECT_NAMES: set[str] = {"01", "face00"}
+EXPORT_EXCLUDED_OBJECT_NAMES: set[str] = set()
 UNITY_HUMANOID_BONE_MAPPING = {
     "hips": "\u8170",
     "spine": "\u4e0a\u534a\u8eab",
     "chest": "\u4e0a\u534a\u8eab2",
     "neck": "\u9996",
     "head": "\u982d",
+    "jaw": "\u3042\u3054",
+    "left_eye": "\u5de6\u76ee",
+    "right_eye": "\u53f3\u76ee",
+    "left_shoulder": "\u5de6\u80a9",
     "left_upper_arm": "\u5de6\u8155",
     "left_lower_arm": "\u5de6\u3072\u3058",
     "left_hand": "\u5de6\u624b\u9996",
+    "right_shoulder": "\u53f3\u80a9",
     "right_upper_arm": "\u53f3\u8155",
     "right_lower_arm": "\u53f3\u3072\u3058",
     "right_hand": "\u53f3\u624b\u9996",
     "left_upper_leg": "\u5de6\u8db3",
     "left_lower_leg": "\u5de6\u3072\u3056",
     "left_foot": "\u5de6\u8db3\u9996",
+    "left_toes": "\u5de6\u3064\u307e\u5148",
     "right_upper_leg": "\u53f3\u8db3",
     "right_lower_leg": "\u53f3\u3072\u3056",
     "right_foot": "\u53f3\u8db3\u9996",
+    "right_toes": "\u53f3\u3064\u307e\u5148",
 }
 
 
@@ -270,6 +298,14 @@ def write_glb_structure(
     path.write_bytes(rebuilt)
 
 
+def find_source_glb_path() -> Path | None:
+    blend_dir = Path(bpy.data.filepath).resolve().parent
+    candidates = sorted(blend_dir.glob("*.glb"))
+    if not candidates:
+        return None
+    return candidates[0]
+
+
 def gltf_rotation_to_blender(rotation: list[float]) -> Quaternion:
     return Quaternion((rotation[3], rotation[0], rotation[1], rotation[2]))
 
@@ -340,11 +376,17 @@ def is_descendant_of(obj: bpy.types.Object, root: bpy.types.Object) -> bool:
     return False
 
 
+def is_export_excluded_object(obj: bpy.types.Object) -> bool:
+    return obj.name in EXPORT_EXCLUDED_OBJECT_NAMES
+
+
 def armature_descendant_meshes(armature: bpy.types.Object) -> list[bpy.types.Object]:
     return [
         obj
         for obj in bpy.data.objects
-        if obj.type == "MESH" and (obj.parent == armature or is_descendant_of(obj, armature))
+        if obj.type == "MESH"
+        and not is_export_excluded_object(obj)
+        and (obj.parent == armature or is_descendant_of(obj, armature))
     ]
 
 
@@ -655,6 +697,7 @@ def build_manifest(
         "vrmSupport": vrm_support,
         "exportDetails": export_details or {},
         "validation": validation or {},
+        "exportExclusions": sorted(EXPORT_EXCLUDED_OBJECT_NAMES),
         "warnings": warnings,
         "error": error,
     }
@@ -751,6 +794,164 @@ def validate_mesh_skinning(summary: dict) -> dict:
         "issueCount": len(issues),
         "issues": issues,
     }
+
+
+def extract_material_surface_inputs(
+    material: bpy.types.Material,
+) -> tuple[bpy.types.Image | None, bpy.types.Image | None, tuple[float, float, float, float]]:
+    fallback_color = tuple(float(value) for value in material.diffuse_color)
+    if not material.use_nodes or material.node_tree is None:
+        return None, None, fallback_color
+
+    color_image = None
+    alpha_image = None
+    first_image = None
+    principled_node = None
+    for node in material.node_tree.nodes:
+        if first_image is None and node.bl_idname == "ShaderNodeTexImage" and getattr(node, "image", None):
+            first_image = node.image
+        if principled_node is None and node.bl_idname == "ShaderNodeBsdfPrincipled":
+            principled_node = node
+
+    if principled_node is not None:
+        fallback_color = tuple(float(value) for value in principled_node.inputs["Base Color"].default_value)
+        if principled_node.inputs["Base Color"].is_linked:
+            source_node = principled_node.inputs["Base Color"].links[0].from_node
+            if source_node.bl_idname == "ShaderNodeTexImage" and getattr(source_node, "image", None):
+                color_image = source_node.image
+        if principled_node.inputs["Alpha"].is_linked:
+            source_node = principled_node.inputs["Alpha"].links[0].from_node
+            if source_node.bl_idname == "ShaderNodeTexImage" and getattr(source_node, "image", None):
+                alpha_image = source_node.image
+
+    if color_image is None:
+        color_image = first_image
+    if alpha_image is None:
+        alpha_image = color_image
+
+    return color_image, alpha_image, fallback_color
+
+
+def ensure_shadow_override_image(
+    material: bpy.types.Material,
+    alpha_image: bpy.types.Image | None,
+    shadow_color: tuple[float, float, float, float],
+    alpha_scale: float,
+) -> bpy.types.Image | None:
+    if alpha_image is None:
+        return None
+
+    generated_dir = ensure_dir(Path(bpy.data.filepath).resolve().parent / ".generated-textures")
+    output_path = generated_dir / f"{material.name}-shadow-override.png"
+    image_name = f"{material.name}_shadow_override"
+
+    width, height = alpha_image.size
+    source_pixels = list(alpha_image.pixels[:])
+    generated_pixels: list[float] = []
+    for pixel_index in range(0, len(source_pixels), 4):
+        alpha = max(0.0, min(1.0, source_pixels[pixel_index + 3] * alpha_scale))
+        generated_pixels.extend(
+            [
+                float(shadow_color[0]),
+                float(shadow_color[1]),
+                float(shadow_color[2]),
+                alpha,
+            ]
+        )
+
+    existing = bpy.data.images.get(image_name)
+    if existing is not None and list(existing.size) != [width, height]:
+        bpy.data.images.remove(existing)
+        existing = None
+
+    image = existing or bpy.data.images.new(image_name, width=width, height=height, alpha=True)
+    image.colorspace_settings.name = "sRGB"
+    image.alpha_mode = "STRAIGHT"
+    image.file_format = "PNG"
+    image.filepath_raw = str(output_path)
+    image.pixels[:] = generated_pixels
+    image.save()
+    image.reload()
+    return image
+
+
+def convert_material_to_anime_principled(material: bpy.types.Material, source_metadata: dict[str, object] | None = None) -> None:
+    color_image, alpha_image, fallback_color = extract_material_surface_inputs(material)
+    alpha_mode = str((source_metadata or {}).get("alphaMode", "OPAQUE")).upper()
+    alpha_mode = FACE_ALPHA_MODE_OVERRIDES.get(material.name, alpha_mode)
+    double_sided = bool((source_metadata or {}).get("doubleSided", False))
+
+    shadow_override = SHADOW_OVERRIDE_MATERIALS.get(material.name)
+    if shadow_override:
+        color_image = ensure_shadow_override_image(
+            material,
+            alpha_image or color_image,
+            shadow_override["color"],
+            float(shadow_override["alpha_scale"]),
+        )
+        alpha_image = color_image
+        alpha_mode = str(shadow_override["alpha_mode"]).upper()
+        fallback_color = shadow_override["color"]
+        double_sided = True
+
+    material.use_nodes = True
+    node_tree = material.node_tree
+    if node_tree is None:
+        return
+
+    for node in list(node_tree.nodes):
+        node_tree.nodes.remove(node)
+
+    output_node = node_tree.nodes.new("ShaderNodeOutputMaterial")
+    output_node.location = (400.0, 0.0)
+
+    shader_node = node_tree.nodes.new("ShaderNodeBsdfPrincipled")
+    shader_node.location = (80.0, 0.0)
+    shader_node.inputs["Base Color"].default_value = fallback_color
+    shader_node.inputs["Metallic"].default_value = 0.0
+    shader_node.inputs["Roughness"].default_value = 1.0
+    if "Specular IOR Level" in shader_node.inputs:
+        shader_node.inputs["Specular IOR Level"].default_value = 0.0
+
+    node_tree.links.new(shader_node.outputs["BSDF"], output_node.inputs["Surface"])
+
+    if color_image is not None:
+        color_texture_node = node_tree.nodes.new("ShaderNodeTexImage")
+        color_texture_node.location = (-320.0, 80.0)
+        color_texture_node.image = color_image
+        node_tree.links.new(color_texture_node.outputs["Color"], shader_node.inputs["Base Color"])
+
+        if alpha_mode in {"BLEND", "MASK"}:
+            alpha_source_node = color_texture_node
+            if alpha_image is not None and alpha_image != color_image:
+                alpha_texture_node = node_tree.nodes.new("ShaderNodeTexImage")
+                alpha_texture_node.location = (-320.0, -120.0)
+                alpha_texture_node.image = alpha_image
+                alpha_source_node = alpha_texture_node
+
+            node_tree.links.new(alpha_source_node.outputs["Alpha"], shader_node.inputs["Alpha"])
+            material.blend_method = "CLIP" if alpha_mode == "MASK" else "BLEND"
+            if hasattr(material, "alpha_threshold") and alpha_mode == "MASK":
+                material.alpha_threshold = 0.5
+            if hasattr(material, "shadow_method"):
+                material.shadow_method = "HASHED"
+        else:
+            material.blend_method = "OPAQUE"
+    else:
+        material.blend_method = "OPAQUE"
+
+    material.use_backface_culling = not double_sided
+
+
+def normalize_materials_for_anime_vrm(material_metadata: dict[str, dict[str, object]] | None = None) -> list[str]:
+    converted = []
+    metadata = material_metadata or {}
+    for material in bpy.data.materials:
+        if material is None:
+            continue
+        convert_material_to_anime_principled(material, metadata.get(material.name))
+        converted.append(material.name)
+    return converted
 
 
 def ensure_preview_camera(min_v: Vector, max_v: Vector) -> bpy.types.Object:
@@ -915,6 +1116,8 @@ def build_export_validation(summary: dict, export_details: dict) -> dict:
         "meshSkinningIssues": skinning["issues"],
         "rootObjectIsIdentity": bool(root_normalization["rootObjectIsIdentity"]),
         "exportedSceneRootIsIdentity": bool(exported_scene_root.get("isIdentity", False)),
+        "materialMode": export_details.get("materialMode"),
+        "materialCount": export_details.get("materialCount"),
     }
     return validation
 
@@ -1039,6 +1242,60 @@ def load_glb_json(path: Path) -> dict:
     return json_obj
 
 
+def inspect_source_glb_material_metadata() -> dict[str, dict[str, object]]:
+    source_glb_path = find_source_glb_path()
+    if source_glb_path is None:
+        return {}
+
+    glb_json = load_glb_json(source_glb_path)
+    material_metadata = {}
+    for material in glb_json.get("materials", []):
+        name = material.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+
+        material_metadata[name] = {
+            "alphaMode": material.get("alphaMode", "OPAQUE"),
+            "doubleSided": bool(material.get("doubleSided", False)),
+            "unlit": "KHR_materials_unlit" in material.get("extensions", {}),
+        }
+
+    return material_metadata
+
+
+def patch_exported_material_settings(path: Path, material_metadata: dict[str, dict[str, object]]) -> dict[str, dict[str, object]]:
+    version, chunks, json_index, glb_json = load_glb_structure(path)
+    materials = glb_json.get("materials", [])
+    patched = {}
+
+    for material in materials:
+        name = material.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+
+        source_info = material_metadata.get(name, {})
+        alpha_mode = FACE_ALPHA_MODE_OVERRIDES.get(name, source_info.get("alphaMode"))
+        if alpha_mode:
+            material["alphaMode"] = alpha_mode
+            if alpha_mode == "MASK":
+                material["alphaCutoff"] = FACE_ALPHA_CUTOFF
+            else:
+                material.pop("alphaCutoff", None)
+
+        if "doubleSided" in source_info:
+            material["doubleSided"] = bool(source_info["doubleSided"])
+
+        if alpha_mode or "doubleSided" in source_info:
+            patched[name] = {
+                "alphaMode": material.get("alphaMode", "OPAQUE"),
+                "alphaCutoff": material.get("alphaCutoff"),
+                "doubleSided": material.get("doubleSided"),
+            }
+
+    write_glb_structure(path, version, chunks, json_index, glb_json)
+    return patched
+
+
 def normalize_vrm_scene_root(path: Path) -> dict:
     version, chunks, json_index, glb_json = load_glb_structure(path)
     scene_index = int(glb_json.get("scene", 0))
@@ -1111,6 +1368,7 @@ def inspect_vrm_humanoid_mapping(path: Path) -> dict[str, str]:
 
 def export_vrm(path: Path, armature: bpy.types.Object, unity_profile: dict) -> tuple[dict, dict]:
     support = ensure_vrm_support()
+    source_material_metadata = inspect_source_glb_material_metadata()
     if not support["operatorAvailable"]:
         raise RuntimeError(
             "VRM export operator is unavailable. Sync the official VRM addon into "
@@ -1164,6 +1422,7 @@ def export_vrm(path: Path, armature: bpy.types.Object, unity_profile: dict) -> t
     path.write_bytes(glb_bytes)
     normalize_vrm_scene_root(path)
     patched_meta = patch_vrm_meta(path, default_vrm_meta())
+    patched_materials = patch_exported_material_settings(path, source_material_metadata)
     scene_root = inspect_vrm_scene_root(path)
     if not scene_root["isIdentity"]:
         raise RuntimeError(f"Exported VRM root node is not normalized: {scene_root}")
@@ -1200,6 +1459,7 @@ def export_vrm(path: Path, armature: bpy.types.Object, unity_profile: dict) -> t
         "bytesWritten": final_size,
         "tempCleanupWarnings": consume_tempdir_cleanup_warnings(),
         "meta": patched_meta,
+        "patchedMaterials": patched_materials,
         "unityProfile": unity_profile,
     }
     return support, export_details
@@ -1321,8 +1581,11 @@ def run_export_vrm(
             )
             raise RuntimeError("Mesh skinning validation failed before export: " + skinning_errors)
         write_json(inspect_path, summary)
+        converted_materials = normalize_materials_for_anime_vrm(inspect_source_glb_material_metadata())
         render_preview(preview_path, armature_descendant_meshes(armature))
         vrm_support, export_details = export_vrm(vrm_path, armature, unity_profile)
+        export_details["materialMode"] = "anime-principled"
+        export_details["materialCount"] = len(converted_materials)
         validation = build_export_validation(summary, export_details)
         enforce_export_validation(validation, export_details)
         manifest = build_manifest(
@@ -1374,7 +1637,10 @@ def normalize_command(command: str) -> str:
 
 
 def main() -> int:
+    global EXPORT_EXCLUDED_OBJECT_NAMES
     args = parse_args()
+    EXPORT_EXCLUDED_OBJECT_NAMES = set(DEFAULT_EXPORT_EXCLUDED_OBJECT_NAMES)
+    EXPORT_EXCLUDED_OBJECT_NAMES.update(args.exclude_object)
     output_dir = ensure_dir(Path(args.output_dir))
     armature = choose_armature(args.armature_name)
     command = normalize_command(args.command)
